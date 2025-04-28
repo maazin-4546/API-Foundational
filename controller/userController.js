@@ -1,5 +1,5 @@
 const { Users } = require("../models/Users")
-const { findByEmail } = require("../services/userServices")
+const { findByEmail, findById } = require("../services/userServices")
 const bcrypt = require("bcryptjs")
 const nodemailer = require("nodemailer")
 const jwt = require("jsonwebtoken")
@@ -147,7 +147,7 @@ const userLogin = async (req, res) => {
         }
 
         if (checkUser.isBlocked) {
-            return res.status(403).send({ message: "User is temporarily blocked" });
+            return res.status(403).send({ message: "User is blocked by Admin" });
         }
 
         const isPasswordValid = await bcrypt.compare(password, checkUser.password);
@@ -162,24 +162,38 @@ const userLogin = async (req, res) => {
         checkUser.lastLoginAt = new Date();
         await checkUser.save();
 
-        const token = jwt.sign(
-            {
-                userId: checkUser._id,
-                email: checkUser.email,
-            },
+        const accessToken = jwt.sign(
+            { userId: checkUser._id, email: checkUser.email },
             process.env.JWT_SECRET,
-            { expiresIn: "12h" }
+            { expiresIn: "15h" }  // Shorter lifespan
         );
 
-        res.cookie("token", token, {
+        const refreshToken = jwt.sign(
+            { userId: checkUser._id, email: checkUser.email },
+            process.env.JWT_REFRESH_SECRET,
+            { expiresIn: "7d" }  // Longer lifespan
+        );
+
+        checkUser.refreshToken = refreshToken;
+        await checkUser.save();
+
+        res.cookie("accessToken", accessToken, {
             httpOnly: true,
             secure: true,
+            // maxAge: 15 * 60 * 1000, // 15 minutes
+        });
+
+        res.cookie("refreshToken", refreshToken, {
+            httpOnly: true,
+            secure: true,
+            // maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
         });
 
         return res.status(200).send({
             success: true,
             message: "Login successful",
-            token,
+            accessToken,
+            refreshToken,
             user: {
                 userId: checkUser._id,
                 name: checkUser.name,
@@ -187,6 +201,7 @@ const userLogin = async (req, res) => {
                 isAdmin: checkUser.isAdmin,
             }
         });
+
 
     } catch (error) {
         console.error("Login Error:", error.message);
@@ -200,26 +215,40 @@ const userLogin = async (req, res) => {
 
 const userLogout = async (req, res) => {
     try {
+        const { refreshToken } = req.cookies;
+
         res.clearCookie("token", {
             httpOnly: true,
-            secure: true
-        })
-
-        res.status(200).send({
-            success: true,
-            message: "Logout successful"
+            secure: true,
+            sameSite: "Strict",
         });
 
+        res.clearCookie("refreshToken", {
+            httpOnly: true,
+            secure: true,
+            sameSite: "Strict",
+        });
+
+        //  Remove refreshToken from DB
+        if (refreshToken) {
+            const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+            await Users.findByIdAndUpdate(decoded.userId, { $unset: { refreshToken: "" } });
+        }
+
+        return res.status(200).send({
+            success: true,
+            message: "Logout successful",
+        });
 
     } catch (error) {
-        console.log(error)
-        res.status(500).send({
+        console.log("Logout Error:", error.message);
+        return res.status(500).send({
             success: false,
             message: "Logout failed",
-            error: error.message
+            error: error.message,
         });
     }
-}
+};
 
 // ! Forgot and Reset Password
 const forgotPassword = async (req, res) => {
@@ -276,7 +305,19 @@ const forgotPassword = async (req, res) => {
             from: `"ZakDoc" <${process.env.NODEMAILER_EMAIL}>`,
             to: email,
             subject: "Reset Password - ZakDoc",
-            text: `Your OTP to reset your password is: ${otp}. It will expire in 5 minutes.`,
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f7f7f7;">
+                    <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0px 0px 10px rgba(0,0,0,0.1);">
+                        <h2 style="color: #4CAF50;">Congratulations!</h2>
+                        <p style="font-size: 16px; color: #555;">
+                           Your OTP to reset your password is: <strong>${otp}</strong> It will expire in 5 minutes.
+                        </p>
+                        <p style="font-size: 14px; color: #999;">Thank you for contributing to ZakDoc.</p>
+                        <hr style="margin: 20px 0;">
+                        <p style="font-size: 12px; color: #ccc; text-align: center;">ZakDoc Team</p>
+                    </div>
+                </div>
+            `,
         };
 
         await transporter.sendMail(mailOptions);
@@ -417,11 +458,52 @@ const resendOtp = async (req, res) => {
     }
 };
 
+//! Refresh Access Token 
+const refreshAccessToken = async (req, res) => {
+    try {
+        const { refreshToken } = req.cookies;
+
+        if (!refreshToken) {
+            return res.status(401).send({ message: "Refresh Token required" });
+        }
+
+        const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+
+        const user = await findById(decoded.userId);
+
+        if (!user || user.refreshToken !== refreshToken) {
+            return res.status(403).send({ message: "Invalid Refresh Token" });
+        }
+
+        const newAccessToken = jwt.sign(
+            { userId: user._id, email: user.email },
+            process.env.JWT_SECRET,
+            { expiresIn: "15m" }
+        );
+
+        res.cookie("accessToken", newAccessToken, {
+            httpOnly: true,
+            secure: true,
+            maxAge: 15 * 60 * 1000,
+        });
+
+        return res.status(200).send({
+            success: true,
+            accessToken: newAccessToken,
+        });
+
+    } catch (error) {
+        console.error("Refresh Token Error:", error.message);
+        return res.status(403).send({ message: "Invalid or expired refresh token" });
+    }
+};
+
 
 module.exports = {
     userSignup, verifyOtpAndSignup, userLogin,
     userLogout,
     forgotPassword,
     resetPassword,
-    resendOtp
+    resendOtp,
+    refreshAccessToken
 }

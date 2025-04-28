@@ -1,19 +1,22 @@
 const { Users } = require("../models/Users");
 const jwt = require("jsonwebtoken")
 const bcrypt = require('bcryptjs');
+const nodemailer = require("nodemailer")
+
 const { findByEmail, findUsers, countDocuments, findById } = require("../services/userServices");
+const { findArticleById } = require("../services/articleServices");
 
 
 const createUserByAdmin = async (req, res) => {
     try {
         if (!req.user.isAdmin) {
-            return res.status(403).json({ message: "Only admins can create users" });
+            return res.status(403).send({ message: "Only admins can create users" });
         }
 
         const { name, email, password, isAdmin = false } = req.body;
 
         const existing = await findByEmail({ email });
-        if (existing) return res.status(400).json({ message: "User already exists" });
+        if (existing) return res.status(400).send({ message: "User already exists" });
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -26,9 +29,9 @@ const createUserByAdmin = async (req, res) => {
 
         await newUser.save();
 
-        res.status(201).json({ message: "User created successfully", user: newUser });
+        res.status(201).send({ message: "User created successfully", user: newUser });
     } catch (error) {
-        res.status(500).json({ message: "Something went wrong", error });
+        res.status(500).send({ message: "Something went wrong", error });
     }
 };
 
@@ -108,11 +111,11 @@ const adminLogout = async (req, res) => {
 const getUsersByAdmin = async (req, res) => {
     try {
         if (!req.user.isAdmin) {
-            return res.status(403).json({ message: "Only admins can fetch users list" });
+            return res.status(403).send({ message: "Only admins can fetch users list" });
         }
 
         const users = await Users.find({}, "-password -__v")
-        res.status(200).json({
+        res.status(200).send({
             success: true,
             message: "All users fetched successfully",
             users
@@ -145,7 +148,7 @@ const getPaginatedUsers = async (req, res) => {
             .limit(limit)
             .sort({ createdAt: -1 }); // Newest first
 
-        res.status(200).json({
+        res.status(200).send({
             success: true,
             message: "Users fetched successfully",
             page,
@@ -156,7 +159,7 @@ const getPaginatedUsers = async (req, res) => {
 
     } catch (error) {
         console.log(error);
-        res.status(500).json({
+        res.status(500).send({
             success: false,
             message: "Failed to fetch paginated users",
             error: error.message
@@ -193,7 +196,7 @@ const filterUsersByDate = async (req, res) => {
             .limit(parseInt(limit))
             .sort({ createdAt: -1 });
 
-        res.status(200).json({
+        res.status(200).send({
             success: true,
             message: "Users filtered by date",
             users,
@@ -206,7 +209,7 @@ const filterUsersByDate = async (req, res) => {
         });
 
     } catch (error) {
-        res.status(500).json({
+        res.status(500).send({
             success: false,
             message: "Server error while filtering users",
             error: error.message
@@ -242,7 +245,7 @@ const searchUsersByAdmin = async (req, res) => {
             .limit(parseInt(limit))
             .sort({ createdAt: -1 });
 
-        res.status(200).json({
+        res.status(200).send({
             success: true,
             message: "User search successful",
             data: users,
@@ -255,7 +258,7 @@ const searchUsersByAdmin = async (req, res) => {
         });
 
     } catch (error) {
-        res.status(500).json({
+        res.status(500).send({
             success: false,
             message: "Server error while searching users",
             error: error.message
@@ -348,6 +351,164 @@ const deleteUser = async (req, res) => {
 };
 
 
+// ------------- Articles --------------------
+
+
+const approveArticle = async (req, res) => {
+    try {
+        const articleId = req.params.id;
+        const { accessToken } = req.cookies
+
+        if (!req.user.isAdmin) {
+            return res.status(403).send({ message: 'You do not have permission to approve articles.' });
+        }
+
+        const article = await findArticleById(articleId);
+
+        if (!article) {
+            return res.status(404).send({ message: 'Article not found.' });
+        }
+
+        // Check if the article is already approved
+        if (article.status === 'approved') {
+            return res.status(400).send({ message: 'Article is already approved.' });
+        }
+
+        // Update the status to 'approved'
+        article.status = 'approved';
+        article.updatedAt = new Date();
+
+        await article.save();
+
+        const decoded = jwt.verify(accessToken, process.env.JWT_SECRET);
+        const email = decoded.email
+
+        // Configure nodemailer
+        const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: process.env.NODEMAILER_EMAIL,
+                pass: process.env.NODEMAILER_PASSWORD,
+            },
+        });
+
+        const mailOptions = {
+            from: `"ZakDoc" <${process.env.NODEMAILER_EMAIL}>`,
+            to: email,
+            subject: "Article Approval Notification",
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f7f7f7;">
+                    <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0px 0px 10px rgba(0,0,0,0.1);">
+                        <h2 style="color: #4CAF50;">Congratulations!</h2>
+                        <p style="font-size: 16px; color: #555;">
+                            Your article with ID <strong>${article._id}</strong> has been <span style="color: green; font-weight: bold;">approved</span> by the admin.
+                        </p>
+                        <p style="font-size: 14px; color: #999;">Thank you for contributing to ZakDoc. Keep writing great articles!</p>
+                        <hr style="margin: 20px 0;">
+                        <p style="font-size: 12px; color: #ccc; text-align: center;">ZakDoc Team</p>
+                    </div>
+                </div>
+            `,
+        };
+
+
+        await transporter.sendMail(mailOptions);
+
+        res.status(200).send({
+            success: true,
+            message: 'Article approved successfully!',
+            article,
+        });
+
+    } catch (error) {
+        console.error('Error approving article:', error.message);
+        return res.status(500).send({
+            success: false,
+            message: 'Server error. Please try again later.',
+            error: error.message,
+        });
+    }
+};
+
+
+const rejectArticle = async (req, res) => {
+    try {
+        const articleId = req.params.id;
+        const { accessToken } = req.cookies
+
+        if (!req.user.isAdmin) {
+            return res.status(403).send({ message: 'You do not have permission to reject articles.' });
+        }
+
+        const article = await findArticleById(articleId);
+
+        if (!article) {
+            return res.status(404).send({ message: 'Article not found.' });
+        }
+
+        // Check if the article is already rejected
+        if (article.status === 'rejected') {
+            return res.status(400).send({ message: 'Article is already rejected.' });
+        }
+
+        // Update the status to 'rejected'
+        article.status = 'rejected';
+        article.updatedAt = new Date();
+
+        await article.save();
+
+        const decoded = jwt.verify(accessToken, process.env.JWT_SECRET);
+        const email = decoded.email
+
+        // Configure nodemailer
+        const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: process.env.NODEMAILER_EMAIL,
+                pass: process.env.NODEMAILER_PASSWORD,
+            },
+        });
+
+        const mailOptions = {
+            from: `"ZakDoc" <${process.env.NODEMAILER_EMAIL}>`,
+            to: email,
+            subject: "Article Rejection Notification",
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f7f7f7;">
+                    <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0px 0px 10px rgba(0,0,0,0.1);">
+                        <h2 style="color: #4CAF50;">Sorry.</h2>
+                        <p style="font-size: 16px; color: #555;">
+                            Your article with ID <strong>${article._id}</strong> has been <span style="color: green; font-weight: bold;">rejected</span> by the admin.
+                        </p>
+                        <p style="font-size: 14px; color: #999;">Thank you for contributing to ZakDoc. Keep writing great articles!</p>
+                        <hr style="margin: 20px 0;">
+                        <p style="font-size: 12px; color: #ccc; text-align: center;">ZakDoc Team</p>
+                    </div>
+                </div>
+            `,
+        };
+
+
+        await transporter.sendMail(mailOptions);
+
+        res.status(200).send({
+            success: true,
+            message: 'Article rejected successfully!',
+            article,
+        });
+
+    } catch (error) {
+        console.error('Error approving article:', error.message);
+        return res.status(500).send({
+            success: false,
+            message: 'Server error. Please try again later.',
+            error: error.message,
+        });
+    }
+};
+
+
+
 module.exports = {
     createUserByAdmin, adminLogin, adminLogout,
     getUsersByAdmin,
@@ -355,5 +516,7 @@ module.exports = {
     filterUsersByDate,
     searchUsersByAdmin,
     blockOrUnblockUser,
-    deleteUser
+    deleteUser,
+    approveArticle,
+    rejectArticle
 }

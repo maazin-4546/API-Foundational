@@ -20,10 +20,16 @@ const countDocuments = async () => {
     return user
 }
 
+const findByIdAndUpdate = async (id, query = {}) => {
+    const user = await Users.findByIdAndUpdate(id, query)
+    return user
+}
+
 
 module.exports = {
     findByEmail,
     findById,
     findUsers,
-    countDocuments
+    countDocuments,
+    findByIdAndUpdate
 }
